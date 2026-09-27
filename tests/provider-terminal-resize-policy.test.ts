@@ -4,9 +4,9 @@ import { claudeCodeAdapter } from '@/lib/cli/providers/claude-code/adapter';
 import { codexAdapter } from '@/lib/cli/providers/codex/adapter';
 import { opencodeAdapter } from '@/lib/cli/providers/opencode/adapter';
 
-test('only Codex requests resize-scoped ED3 scrollback protection', () => {
+test('providers preserve native scrollback clears so resize redraws can replace history', () => {
   assert.equal(claudeCodeAdapter.getTerminalResizeScrollbackPolicy(), 'native');
-  assert.equal(codexAdapter.getTerminalResizeScrollbackPolicy(), 'preserve-on-ed3');
+  assert.equal(codexAdapter.getTerminalResizeScrollbackPolicy(), 'native');
   assert.equal(opencodeAdapter.getTerminalResizeScrollbackPolicy(), 'native');
 });
 
