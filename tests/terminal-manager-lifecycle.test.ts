@@ -7,6 +7,7 @@ import test, { before } from 'node:test';
 import type { ServerTransportMessage } from '@/lib/ws/message-types';
 import type { TerminalCreateOptions, TerminalPtyFactory } from '@/lib/terminal/types';
 import { mintPaneToken, resolvePaneToken } from '@/lib/terminal/pane-token-registry';
+import { codexAdapter } from '@/lib/cli/providers/codex/adapter';
 
 process.env.TESSERA_DATA_DIR = mkdtempSync(path.join(tmpdir(), 'tessera-terminal-test-'));
 process.env.NODE_ENV = 'test';
@@ -1332,6 +1333,69 @@ test('cold attach receives one snapshot boundary followed by monotonic live outp
   }
 
   await manager.shutdownAll();
+});
+
+test('Codex mobile-to-desktop redraw replaces old history for live and cold surfaces', async () => {
+  const delivered: Array<{ connectionId: string; message: ServerTransportMessage }> = [];
+  const spawned: FakePty[] = [];
+  const manager = new TerminalManager(
+    (connectionId, message) => delivered.push({ connectionId, message }),
+    async () => createFactory(spawned),
+  );
+
+  try {
+    await manager.create(createOptions({
+      cols: 34,
+      rows: 8,
+      resizeScrollbackPolicy: codexAdapter.getTerminalResizeScrollbackPolicy(),
+    }));
+    spawned[0].emitData('MOBILE_LAYOUT\r\n' + 'narrow history row\r\n'.repeat(80));
+    await nextImmediate();
+
+    await manager.create(createOptions({
+      connectionId: 'connection-desktop',
+      surfaceId: 'surface-desktop',
+      cols: 178,
+      rows: 24,
+    }));
+    const mobileSnapshot = delivered.find(({ connectionId, message }) =>
+      connectionId === 'connection-desktop' && message.type === 'terminal_snapshot'
+    )?.message;
+    assert.equal(mobileSnapshot?.type, 'terminal_snapshot');
+    if (mobileSnapshot?.type !== 'terminal_snapshot') return;
+    assert.match(mobileSnapshot.data, /MOBILE_LAYOUT/);
+    delivered.length = 0;
+
+    manager.resize('terminal-a', 'user-a', 'connection-desktop', 'surface-desktop', 178, 24, true);
+    // Codex clears the visible screen AND scrollback before replaying history
+    // at the new width. Split ED3 across native PTY chunks as on a real pipe.
+    spawned[0].emitData('\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[');
+    spawned[0].emitData('3J\x1b[HDESKTOP_LAYOUT\r\nrewrapped history\r\nPROMPT');
+    await nextImmediate();
+
+    const desktopOutput = delivered
+      .filter(({ connectionId, message }) => connectionId === 'connection-desktop' && message.type === 'terminal_output')
+      .map(({ message }) => message.type === 'terminal_output' ? message.data : '')
+      .join('');
+    assert.match(desktopOutput, /\x1b\[3J/, 'live surfaces must receive the history replacement clear');
+
+    await manager.create(createOptions({
+      connectionId: 'connection-cold',
+      surfaceId: 'surface-cold',
+      cols: 178,
+      rows: 24,
+    }));
+    const desktopSnapshot = delivered.find(({ connectionId, message }) =>
+      connectionId === 'connection-cold' && message.type === 'terminal_snapshot'
+    )?.message;
+    assert.equal(desktopSnapshot?.type, 'terminal_snapshot');
+    if (desktopSnapshot?.type !== 'terminal_snapshot') return;
+    assert.equal(desktopSnapshot.cols, 178);
+    assert.doesNotMatch(desktopSnapshot.data, /MOBILE_LAYOUT|narrow history row/);
+    assert.match(desktopSnapshot.data, /DESKTOP_LAYOUT/);
+  } finally {
+    await manager.shutdownAll();
+  }
 });
 
 test('resize redraw cannot erase scrollback even when ED3 is split across PTY chunks', async () => {

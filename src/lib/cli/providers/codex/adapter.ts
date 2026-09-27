@@ -280,8 +280,10 @@ export class CodexAdapter implements CliProvider {
     return 'restart';
   }
 
-  getTerminalResizeScrollbackPolicy(): 'preserve-on-ed3' {
-    return 'preserve-on-ed3';
+  getTerminalResizeScrollbackPolicy(): 'native' {
+    // Codex replaces scrollback with history rewrapped for the new width.
+    // Swallowing its ED3 clear leaves stale narrow rows beside the redraw.
+    return 'native';
   }
 
   getTerminalInterruptInputPolicy(): 'single-escape' {
