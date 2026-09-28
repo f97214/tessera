@@ -27,6 +27,7 @@ import {
 } from "@/lib/workspace-tabs/open-workspace-tab";
 import { resolveWorkspaceTarget } from '@/types/worktree';
 import { WorkspaceFilePanel } from "@/components/workspace/workspace-file-panel";
+import type { WorkspaceFileRef } from '@/lib/workspace-tabs/special-session';
 import { MemoryPanel } from "@/components/memory/memory-panel";
 import { ImageGenerationsPanel } from "@/components/image-generation/image-generations-panel";
 import { cn } from "@/lib/utils";
@@ -82,6 +83,7 @@ function GitPanelTabButton({
 
 export function GitPanel({
   sessionId,
+  activeFileRef = null,
   isActive = true,
   worktreeId = null,
   width,
@@ -90,6 +92,7 @@ export function GitPanel({
   onClose,
 }: {
   sessionId: string | null;
+  activeFileRef?: WorkspaceFileRef | null;
   isActive?: boolean;
   worktreeId?: string | null;
   width: number | string;
@@ -383,6 +386,8 @@ export function GitPanel({
       {effectivePanelTab === "files" ? (
         <div className="min-h-0 flex-1">
           <WorkspaceFilePanel
+            gitData={controller.data}
+            activeFileRef={activeFileRef}
             key={sessionId ?? worktreeId ?? "no-target"}
             sessionId={sessionId}
             worktreeId={worktreeId}

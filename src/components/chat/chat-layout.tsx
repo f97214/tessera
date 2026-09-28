@@ -123,6 +123,7 @@ export function ChatLayout() {
   const viewMode = useBoardStore((state) => state.viewMode);
   const renderedViewMode = useEffectiveViewMode();
   const peekSessionId = useBoardStore((state) => state.peekSessionId);
+  const peekFileRef = useBoardStore((state) => state.peekFileRef);
   const peekFileSourceSessionId = useBoardStore(
     (state) => state.peekFileRef?.sourceSessionId ?? null,
   );
@@ -168,6 +169,12 @@ export function ChatLayout() {
     )
   );
   const isKanbanPeekMode = renderedViewMode === 'board' && kanbanSessionOpenMode === 'peek';
+  const activeEditorRef = isKanbanPeekMode
+    ? peekFileRef
+    : activePanelSessionId ? parseWorkspaceSpecialSessionId(activePanelSessionId) : null;
+  const activeFileRef = activeEditorRef?.type === 'workspace-file' || activeEditorRef?.type === 'worktree-file'
+    ? activeEditorRef
+    : null;
   const openBoardGitSessionId = peekSessionId ?? peekFileSourceSessionId;
   const activeGitSessionId = isKanbanPeekMode
     ? openBoardGitSessionId
@@ -708,6 +715,7 @@ export function ChatLayout() {
                 </div>
               )}
               <GitPanel
+                activeFileRef={activeFileRef}
                 sessionId={activeGitTargetSessionId}
                 isActive={Boolean(activeGitTargetSessionId)}
                 worktreeId={activeGitWorktreeId}

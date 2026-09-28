@@ -21,12 +21,16 @@ const worktreeDirectoryRouteSource = read('../src/app/api/worktrees/[id]/directo
 const filesRouteSource = read('../src/app/api/sessions/[id]/files/route.ts');
 const fileTabSource = read('../src/components/workspace/workspace-file-tab.tsx');
 const panelContainerSource = read('../src/components/panel/panel-container.tsx');
+const sharedTreeRowSource = read('../src/components/workspace/workspace-tree-row.tsx');
+const treeRenderStart = filePanelSource.indexOf('function renderTreeNode(');
+const fileRowStart = filePanelSource.indexOf('const isSelected =', treeRenderStart);
+assert.ok(treeRenderStart >= 0 && fileRowStart > treeRenderStart, 'both row render branches must exist');
 const directoryRowSource = filePanelSource.slice(
-  filePanelSource.indexOf('if (node.type === "directory")'),
-  filePanelSource.indexOf('const isSelected = node.path === selectedPath'),
+  treeRenderStart,
+  fileRowStart,
 );
 const fileRowSource = filePanelSource.slice(
-  filePanelSource.indexOf('const isSelected = node.path === selectedPath'),
+  fileRowStart,
   filePanelSource.indexOf('if (!sessionId && !worktreeId)'),
 );
 
@@ -61,7 +65,7 @@ test('every row action lives on the right-click menu, not on a hover strip', () 
   }
   // A folder row deletes as a directory, a file row as a file: the two take
   // different confirmation copy and only one sends `recursive`.
-  assert.match(filePanelSource, /if \(node\.type === "directory"\) return \{ kind: "directory", path: node\.path \}/);
+  assert.match(filePanelSource, /if \(node\.type === "directory"\) return \{ kind: "directory", path: node\.path, dirty: hasUnsavedWorkspaceFileEditsUnder\(targetKey, node\.path\) \}/);
   assert.match(filePanelSource, /kind: "file",\s*\n\s*path: node\.path,/);
 });
 
@@ -81,10 +85,12 @@ test('the delete confirmation states what is lost', () => {
   // file — there is no Trash and no undo behind any of it.
   assert.match(deleteDialogSource, /Everything inside this folder is deleted too/);
   assert.match(deleteDialogSource, /does not go to the Trash and cannot be undone/);
-  assert.match(deleteDialogSource, /unsaved edits, and they are discarded with it/);
+  assert.match(deleteDialogSource, /Unsaved edits in the selected items will be discarded/);
+  assert.match(deleteDialogSource, /entries\.some\(\(entry\) => entry\.dirty\)/);
   assert.match(deleteDialogSource, /data-testid="workspace-delete-confirm"/);
   // Cancel must not be the destructive path.
-  assert.match(deleteDialogSource, /onClick=\{\(\) => onOpenChange\(false\)\}/);
+  assert.match(deleteDialogSource, /onClick=\{\(\) => changeOpen\(false\)\}/);
+  assert.match(deleteDialogSource, /function changeOpen\(next: boolean\) \{\s*if \(!deleting\) onOpenChange\(next\);/);
 });
 
 test('a dirty buffer is visible to the delete confirmation', () => {
@@ -170,7 +176,8 @@ test('an input from another workspace cannot strand this panel', () => {
 
 test('a file click previews once and its double-click respects Kanban Peek', () => {
   // Both clicks reach the row, but only the first is an independent preview.
-  assert.match(fileRowSource, /if \(!shouldOpenOnRowClick\(event\.detail\)\) return;/);
+  assert.match(fileRowSource, /if \(event\.detail !== 0 && !shouldOpenOnRowClick\(event\.detail\)\) return;/);
+  assert.match(fileRowSource, /if \(treeSelection\.selectWithModifiers\(node\.path, event\)\) return;/);
   assert.match(inlineStateSource, /return clickCount === 1/);
   assert.match(
     fileRowSource,
@@ -178,9 +185,10 @@ test('a file click previews once and its double-click respects Kanban Peek', () 
   );
 
   const doubleClick = fileRowSource.match(
-    /onDoubleClick=\{\(\) => \{(?<body>[\s\S]*?)\n\s*\}\}\s*onKeyDown/,
+    /onDoubleClick=\{\(event\) => \{(?<body>[\s\S]*?)\n\s*\}\}\s*onKeyDown/,
   );
   assert.ok(doubleClick?.groups?.body, 'the file row owns a double-click handler');
+  assert.match(doubleClick.groups.body, /if \(!target \|\| event\.ctrlKey \|\| event\.metaKey \|\| event\.shiftKey\) return;/);
   assert.match(doubleClick.groups.body, /openWorkspaceTargetFileTab\(target, 'file', node\.path/);
   assert.match(
     doubleClick.groups.body,
@@ -188,7 +196,7 @@ test('a file click previews once and its double-click respects Kanban Peek', () 
     'double-click pins in List mode but must stay inside Kanban Peek mode',
   );
   // F2 renames; Enter still activates the row, so the keyboard can open a file.
-  assert.match(fileRowSource, /if \(!canMutate \|\| event\.key !== "F2"\) return;/);
+  assert.match(fileRowSource, /if \(!canMutate \|\| treeSelection\.selection\.paths\.size > 1 \|\| event\.key !== "F2"\) return;/);
 });
 
 test('folder toggles have no delayed timer that can fire under an input', () => {
@@ -210,7 +218,10 @@ test('a watch reconcile cannot take the row being edited', () => {
 test('double-clicking a directory name renames without fighting its toggle', () => {
   // A fast second click is reserved for rename. A slower second click must
   // remain a normal toggle even when Chromium still emits `dblclick`.
-  assert.match(directoryRowSource, /if \(!directoryRenameDoubleClickRef\.current\?\.qualified\) return;/);
+  assert.match(directoryRowSource, /if \(!canMutate \|\| !directoryRenameDoubleClickRef\.current\?\.qualified\) return;/);
+  assert.match(directoryRowSource, /<WorkspaceTreeDirectoryButton/);
+  assert.match(directoryRowSource, /nameProps=\{\{\s*onDoubleClick:/);
+  assert.match(sharedTreeRowSource, /<span \{\.\.\.nameProps\}/);
   assert.match(filePanelSource, /isRapidDirectoryRenameDoubleClick\(\{/);
   assert.match(filePanelSource, /shouldToggleDirectoryOnClick\(event\.detail, qualifiedDoubleClick\)/);
   assert.match(inlineStateSource, /return clickCount !== 2 \|\| !isQualifiedDoubleClick;/);

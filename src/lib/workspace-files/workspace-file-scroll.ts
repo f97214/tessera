@@ -3,8 +3,9 @@ export function restoreWorkspaceFileScroll(
   viewport: HTMLDivElement,
   savedTop: number,
   save: (scrollTop: number) => void,
+  stopRestoringSignal?: AbortSignal,
 ): () => void {
-  let restoring = true;
+  let restoring = !stopRestoringSignal?.aborted;
   let lastTop = savedTop;
   const restore = () => {
     if (!restoring) return;
@@ -34,6 +35,7 @@ export function restoreWorkspaceFileScroll(
   viewport.addEventListener('pointerdown', onInteraction, { passive: true });
   viewport.addEventListener('touchstart', onInteraction, { passive: true });
   viewport.addEventListener('keydown', onKeyDown);
+  stopRestoringSignal?.addEventListener('abort', onInteraction, { once: true });
   restore();
   return () => {
     observer.disconnect();
@@ -42,6 +44,7 @@ export function restoreWorkspaceFileScroll(
     viewport.removeEventListener('pointerdown', onInteraction);
     viewport.removeEventListener('touchstart', onInteraction);
     viewport.removeEventListener('keydown', onKeyDown);
+    stopRestoringSignal?.removeEventListener('abort', onInteraction);
     // Keep the requested offset if the user leaves before folder loading ends.
     // A hidden/unmounted viewport can already have been clamped to zero.
     save(!restoring && viewport.clientHeight > 0 ? viewport.scrollTop : lastTop);

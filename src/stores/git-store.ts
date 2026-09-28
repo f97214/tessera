@@ -10,6 +10,8 @@ interface GitPanelUIState {
   panelWidth: number
   drawerOpen: boolean
   drawerHeight: number
+  changedFilesView: 'list' | 'tree'
+  setChangedFilesView: (view: 'list' | 'tree') => void
   /**
    * Kept here rather than inside the panel so that anything with a reason to
    * send the user to a particular tab — a preparation badge, a worktree that
@@ -38,7 +40,7 @@ interface GitPanelUIState {
 
 type PersistedGitPanelUIState = Pick<
   GitPanelUIState,
-  'isOpen' | 'panelWidth' | 'drawerHeight' | 'panelTab' | 'panelTabsBySessionId'
+  'isOpen' | 'panelWidth' | 'drawerHeight' | 'changedFilesView' | 'panelTab' | 'panelTabsBySessionId'
 >
 
 export const useGitStore = create<GitPanelUIState>()(
@@ -48,6 +50,8 @@ export const useGitStore = create<GitPanelUIState>()(
       panelWidth: 320,
       drawerOpen: false,
       drawerHeight: 320,
+      changedFilesView: 'tree',
+      setChangedFilesView: (changedFilesView) => set({ changedFilesView }),
       panelTab: 'git',
       panelTabsBySessionId: {},
       getPanelTab: (sessionId) => sessionId
@@ -84,6 +88,7 @@ export const useGitStore = create<GitPanelUIState>()(
         isOpen: state.isOpen,
         panelWidth: state.panelWidth,
         drawerHeight: state.drawerHeight,
+        changedFilesView: state.changedFilesView,
         panelTab: state.panelTab,
         panelTabsBySessionId: state.panelTabsBySessionId,
       }),
