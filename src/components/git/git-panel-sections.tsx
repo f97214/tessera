@@ -5,6 +5,8 @@ import {
   AlertCircle,
   CheckCircle2,
   ChevronDown,
+  List,
+  ListTree,
   Cloud,
   CloudOff,
   Copy,
@@ -17,11 +19,18 @@ import {
   LoaderCircle,
   Undo2,
 } from "lucide-react";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip } from "@/components/ui/tooltip";
 import { GitRevertConfirmDialog } from "@/components/git/git-revert-confirm-dialog";
+import {
+  WorkspaceFileIcon, WorkspaceFileName, WorkspaceTreeBranchGuide,
+  WorkspaceTreeDirectoryButton, WorkspaceTreeFileButton,
+  workspaceTreeFileRowClassName, workspaceTreePadding,
+} from "@/components/workspace/workspace-tree-row";
+import { WorkspaceTreeExpansionControls } from "@/components/workspace/workspace-tree-expansion-controls";
+import { shouldOpenOnRowClick } from "@/components/workspace/workspace-inline-input-state";
 import { WorkspaceFileContextMenu } from "@/components/workspace/workspace-file-context-menu";
 import { setWorkspaceFileDragData } from "@/lib/dnd/panel-session-drag";
 import { useI18n } from "@/lib/i18n";
@@ -42,6 +51,7 @@ import type {
   GitDiffData,
   GitPanelData,
 } from "@/types/git";
+import { buildChangedFileRows, type ChangedFileRow } from "@/lib/git/changed-file-tree";
 import { useGitStore } from "@/stores/git-store";
 import { isCurrentTaskPr } from '@/types/task-pr-status';
 import { GitActionMenu } from "./git-action-menu";
@@ -180,19 +190,20 @@ function FileBadge({ file }: { file: GitChangedFile }) {
  * end-truncated path hides the part people use to tell adjacent files apart.
  */
 function FilePath({ path }: { path: string }) {
-  const slashIndex = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  const slashIndex = path.lastIndexOf("/");
   if (slashIndex === -1) {
-    return <span className="truncate">{path}</span>;
+    return <WorkspaceFileName name={path} />;
   }
 
   const directory = path.slice(0, slashIndex);
   const filename = path.slice(slashIndex + 1);
 
   return (
-    <span className="flex min-w-0 items-baseline" title={path}>
-      <span className="min-w-0 truncate text-(--text-muted)">{directory}</span>
-      <span className="shrink-0 text-(--text-muted)">/</span>
-      <span className="shrink-0">{filename}</span>
+    <span className="flex min-w-0 flex-1 items-baseline gap-2 overflow-hidden" title={path}>
+      <span className="flex min-w-0 flex-1 overflow-hidden" data-git-file-name>
+        <WorkspaceFileName name={filename} />
+      </span>
+      <span className="max-w-[45%] min-w-0 shrink truncate text-[11px] text-(--text-muted)" data-git-file-directory>{directory}</span>
     </span>
   );
 }
@@ -820,9 +831,26 @@ export function GitPanelContentSection({
   const revertableSelectedFiles = (data?.changedFiles ?? []).filter(
     (file) => commit.isSelected(file.path) && canRevertFile(file),
   );
+  const filesView = useGitStore((state) => state.changedFilesView);
+  const setFilesView = useGitStore((state) => state.setChangedFilesView);
+  const [folderState, setFolderState] = useState<{ target: string | null; collapsed: Set<string> }>({ target: null, collapsed: new Set() });
+  const fileRows = useMemo((): ChangedFileRow[] => {
+    const files = data?.changedFiles ?? [];
+    if (filesView === "list") return files.map((file) => ({ kind: "file", path: file.path, name: file.path, depth: 0, file }));
+    return buildChangedFileRows(files, folderState.target === commit.selectionKey ? folderState.collapsed : new Set());
+  }, [data?.changedFiles, filesView, folderState, commit.selectionKey]);
+  const visibleFiles = useMemo(() => fileRows.flatMap((row) => row.kind === "file" ? [row.file] : []), [fileRows]);
+  function toggleFolder(path: string) {
+    setFolderState((previous) => {
+      const collapsed = new Set(previous.target === commit.selectionKey ? previous.collapsed : []);
+      if (collapsed.has(path)) collapsed.delete(path);
+      else collapsed.add(path);
+      return { target: commit.selectionKey, collapsed };
+    });
+  }
   const { selectAllCheckboxRef, setFileSelected } = useCommitFileSelection({
     allSelected: allCommitFilesSelected,
-    files: data?.changedFiles,
+    files: visibleFiles,
     onSetSelected: commit.onSetSelected,
     someSelected: someCommitFilesSelected,
     targetKey: commit.selectionKey,
@@ -876,7 +904,7 @@ export function GitPanelContentSection({
             ) : (
               <>
                 <div className="flex items-center justify-between gap-2 pl-1.5 pr-1">
-                  <label className="flex min-w-0 items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-(--text-muted)">
+                  <label className="flex min-w-0 items-center gap-2 text-[11px] font-medium text-(--text-secondary)">
                     <input
                       ref={selectAllCheckboxRef}
                       type="checkbox"
@@ -896,6 +924,22 @@ export function GitPanelContentSection({
                       ? (data.changedFilesTotal ?? `${changedFileCount}+`)
                       : changedFileCount}
                   </span>
+                  <div className="ml-auto flex shrink-0 items-center gap-0.5">
+                    {filesView === "tree" ? (
+                      <WorkspaceTreeExpansionControls
+                        disabled={!data.changedFiles.some((file) => file.path.includes("/"))}
+                        onExpandAll={() => setFolderState({ target: commit.selectionKey, collapsed: new Set() })}
+                        onCollapseAll={() => setFolderState({ target: commit.selectionKey, collapsed: new Set(buildChangedFileRows(data.changedFiles, new Set()).filter((row) => row.kind === "folder").map((row) => row.path)) })}
+                      />
+                    ) : null}
+                    <Button type="button" variant="ghost" size="icon" className="h-6 w-6 text-(--text-muted)"
+                      title={t(filesView === "tree" ? "gitPanel.commit.showList" : "gitPanel.commit.showTree")}
+                      aria-label={t(filesView === "tree" ? "gitPanel.commit.showList" : "gitPanel.commit.showTree")}
+                      data-testid="git-files-view-toggle"
+                      onClick={() => setFilesView(filesView === "tree" ? "list" : "tree")}>
+                      {filesView === "tree" ? <List className="h-3.5 w-3.5" /> : <ListTree className="h-3.5 w-3.5" />}
+                    </Button>
+                  </div>
                   <Button
                     type="button"
                     variant="ghost"
@@ -923,148 +967,164 @@ export function GitPanelContentSection({
                 </div>
                 <ScrollArea className={cn(phoneScrollableContent ? "overflow-y-visible" : "flex-1")}>
                   <div className="flex flex-col">
-                    {data.changedFiles.map((file) => {
+                    {fileRows.map((row) => {
+                      if (row.kind === "folder") {
+                        const expanded = !(folderState.target === commit.selectionKey && folderState.collapsed.has(row.path));
+                        return (
+                          <div key={`folder:${row.path}`} className="group relative flex min-w-0 items-center hover:bg-(--sidebar-hover)">
+                            {Array.from({ length: row.depth }, (_, depth) => <WorkspaceTreeBranchGuide key={depth} depth={depth} />)}
+                            <WorkspaceTreeDirectoryButton
+                              name={row.name}
+                              depth={row.depth}
+                              expanded={expanded}
+                              title={row.path}
+                              data-testid={`git-panel-folder-${row.path}`}
+                              onClick={() => toggleFolder(row.path)}
+                            />
+                          </div>
+                        );
+                      }
+                      const file = row.file;
                       const isSelected = file.path === selectedPath;
                       const canOpenReadOnly = file.state !== "deleted";
                       const absolutePath = toAbsoluteWorkspacePath(data.worktreePath, file.path);
                       return (
-                        <div
-                          key={file.path}
-                          draggable={Boolean(sessionId)}
-                          onDragStart={(event) => {
-                            if (!sessionId) return;
-                            setSelectedPath(file.path);
-                            setWorkspaceFileDragData(event.dataTransfer, sessionId, "diff", file.path, absolutePath);
-                          }}
-                          className={cn(
-                            "group relative border-l-2 transition-colors",
-                            isSelected
-                              ? "border-l-(--accent) bg-(--accent)/10 text-(--text-primary)"
-                              : "border-l-transparent text-(--text-secondary) hover:bg-(--sidebar-hover) hover:text-(--text-primary)",
-                          )}
-                          data-testid={`git-panel-file-row-${file.path}`}
-                          onContextMenu={(event) => {
-                            if (!absolutePath) return;
-                            event.preventDefault();
-                            event.stopPropagation();
-                            setSelectedPath(file.path);
-                            setContextMenu({
-                              absolutePath,
-                              canOpenFile: canOpenReadOnly,
-                              position: { x: event.clientX, y: event.clientY },
-                            });
-                          }}
-                        >
-                          <div className="flex w-full min-w-0 items-center">
-                            <input
-                              type="checkbox"
-                              checked={commit.isSelected(file.path)}
-                              // The selection is an input to the commit, so it
-                              // locks with the rest of the form (§7) rather
-                              // than only while a commit is what is running.
-                              disabled={primary.pendingVerb !== null}
-                              onChange={(event) => {
-                                setFileSelected(
-                                  file.path,
-                                  event.currentTarget.checked,
-                                  event.nativeEvent,
-                                );
-                              }}
-                              {...telemetryClickAttributes("git.commit_file.toggle", "git_panel")}
-                              aria-label={t("gitPanel.commit.includeFile", {
-                                path: file.path,
-                              })}
-                              data-testid={`git-commit-file-checkbox-${file.path}`}
-                              className="ml-1 h-3.5 w-3.5 shrink-0 cursor-pointer accent-(--accent) disabled:cursor-not-allowed disabled:opacity-50"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedPath(file.path);
-                                onOpenDiffFile(file);
-                              }}
-                              {...telemetryClickAttributes("git.file.diff_open", "git_panel")}
-                              onDoubleClick={() => {
-                                setSelectedPath(file.path);
-                                onPinDiffFile(file);
-                              }}
-                              className="flex min-w-0 flex-1 items-center gap-1 px-1 py-1.5 text-left"
-                            >
-                              <FileBadge file={file} />
-                              <span className="min-w-0 flex-1 font-mono text-[11px]">
-                                <FilePath path={file.path} />
-                              </span>
-                              {/* The inversion of the rule below: the diff stats give way
-                                  to the action overlay. Below the Phone viewport step that
-                                  overlay is always up, so these always give way (#250). */}
-                              <span className="opacity-0 sm:opacity-100 transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
-                                <FileDiffStats stats={file.diffStats} />
-                              </span>
-                            </button>
-                          </div>
-                          {/* Below the Phone viewport step the actions are simply present:
-                              `hover:` compiles to `@media (hover: hover)`, so on a phone no
-                              rule exists to reveal them. Kept hover-revealed from `sm` up. */}
-                          <div className="pointer-events-auto absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 rounded-md bg-(--sidebar-hover)/95 opacity-100 sm:pointer-events-none sm:opacity-0 shadow-sm transition-opacity sm:group-hover:pointer-events-auto sm:group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
-                            <Tooltip content="Open diff">
-                              <button
-                                type="button"
-                                onClick={() => {
+                        <div key={file.path} className="relative">
+                          {Array.from({ length: row.depth }, (_, depth) => <WorkspaceTreeBranchGuide key={depth} depth={depth} />)}
+                          <div
+                            draggable={Boolean(sessionId)}
+                            onDragStart={(event) => {
+                              if (!sessionId) return;
+                              setSelectedPath(file.path);
+                              setWorkspaceFileDragData(event.dataTransfer, sessionId, "diff", file.path, absolutePath);
+                            }}
+                            className={cn(workspaceTreeFileRowClassName(isSelected), "group/git-file-row")}
+                            data-testid={`git-panel-file-row-${file.path}`}
+                            onContextMenu={(event) => {
+                              if (!absolutePath) return;
+                              event.preventDefault();
+                              event.stopPropagation();
+                              setSelectedPath(file.path);
+                              setContextMenu({
+                                absolutePath,
+                                canOpenFile: canOpenReadOnly,
+                                position: { x: event.clientX, y: event.clientY },
+                              });
+                            }}
+                          >
+                            <div className="flex w-full min-w-0 items-center">
+                              <input
+                                type="checkbox"
+                                checked={commit.isSelected(file.path)}
+                                // The selection is an input to the commit, so it
+                                // locks with the rest of the form (§7) rather
+                                // than only while a commit is what is running.
+                                disabled={primary.pendingVerb !== null}
+                                onChange={(event) => {
+                                  setFileSelected(
+                                    file.path,
+                                    event.currentTarget.checked,
+                                    event.nativeEvent,
+                                  );
+                                }}
+                                {...telemetryClickAttributes("git.commit_file.toggle", "git_panel")}
+                                aria-label={t("gitPanel.commit.includeFile", {
+                                  path: file.path,
+                                })}
+                                data-testid={`git-commit-file-checkbox-${file.path}`}
+                                className="absolute top-1/2 z-10 h-3.5 w-3.5 -translate-y-1/2 cursor-pointer accent-(--accent) disabled:cursor-not-allowed disabled:opacity-50"
+                                style={{ left: workspaceTreePadding(row.depth) }}
+                              />
+                              <WorkspaceTreeFileButton
+                                depth={row.depth}
+                                title={file.path}
+                                onClick={(event) => {
                                   setSelectedPath(file.path);
-                                  onOpenDiffFile(file);
+                                  if (event.detail === 0 || shouldOpenOnRowClick(event.detail)) onOpenDiffFile(file);
                                 }}
                                 {...telemetryClickAttributes("git.file.diff_open", "git_panel")}
-                                className="inline-flex rounded-md p-1 text-(--text-muted) hover:bg-(--chat-bg) hover:text-(--text-primary)"
-                                aria-label={`Open diff for ${file.path}`}
-                              >
-                                <GitCompare className="h-3.5 w-3.5" />
-                              </button>
-                            </Tooltip>
-                            <Tooltip
-                              content={
-                                canOpenReadOnly
-                                  ? "Open file"
-                                  : "Deleted file has no working copy"
-                              }
-                            >
-                              <button
-                                type="button"
-                                onClick={() => {
+                                onDoubleClick={() => {
                                   setSelectedPath(file.path);
-                                  onOpenReadOnlyFile(file);
+                                  onPinDiffFile(file);
                                 }}
-                                {...telemetryClickAttributes("git.file.open", "git_panel")}
-                                onDragStart={(event) => {
-                                  event.stopPropagation();
-                                  if (!sessionId || !canOpenReadOnly) {
-                                    event.preventDefault();
-                                    return;
-                                  }
-                                  setSelectedPath(file.path);
-                                  setWorkspaceFileDragData(event.dataTransfer, sessionId, "file", file.path, absolutePath);
-                                }}
-                                draggable={Boolean(sessionId && canOpenReadOnly)}
-                                disabled={!canOpenReadOnly}
-                                className="inline-flex rounded-md p-1 text-(--text-muted) hover:bg-(--chat-bg) hover:text-(--text-primary) disabled:pointer-events-none disabled:opacity-35"
-                                aria-label={`Open file ${file.path}`}
                               >
-                                <FileText className="h-3.5 w-3.5" />
-                              </button>
-                            </Tooltip>
-                            <Tooltip content="Copy absolute path">
-                              <button
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  onCopyFilePath(file.path);
-                                }}
-                                {...telemetryClickAttributes("git.file.copy_path", "git_panel")}
-                                className="inline-flex rounded-md p-1 text-(--text-muted) hover:bg-(--chat-bg) hover:text-(--text-primary)"
-                                aria-label={`Copy absolute path for ${file.path}`}
+                                <WorkspaceFileIcon name={row.name} />
+                                {filesView === "tree" ? <WorkspaceFileName name={row.name} /> : (
+                                  <span className="min-w-0 flex-1"><FilePath path={file.path} /></span>
+                                )}
+                                <FileBadge file={file} />
+                                {/* The inversion of the rule below: the diff stats give way
+                                    to the action overlay. Below the Phone viewport step that
+                                    overlay is always up, so these always give way (#250). */}
+                                <span className="opacity-0 sm:opacity-100 transition-opacity group-hover/git-file-row:opacity-0">
+                                  <FileDiffStats stats={file.diffStats} />
+                                </span>
+                              </WorkspaceTreeFileButton>
+                            </div>
+                            {/* Below the Phone viewport step the actions are simply present:
+                                `hover:` compiles to `@media (hover: hover)`, so on a phone no
+                                rule exists to reveal them. Kept hover-revealed from `sm` up. */}
+                            <div data-testid={`git-file-actions-${file.path}`} className="pointer-events-auto absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 rounded-md bg-(--sidebar-hover)/95 opacity-100 sm:pointer-events-none sm:opacity-0 shadow-sm transition-opacity sm:group-hover/git-file-row:pointer-events-auto sm:group-hover/git-file-row:opacity-100 has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:opacity-100">
+                              <Tooltip content="Open diff">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedPath(file.path);
+                                    onOpenDiffFile(file);
+                                  }}
+                                  {...telemetryClickAttributes("git.file.diff_open", "git_panel")}
+                                  className="inline-flex rounded-md p-1 text-(--text-muted) hover:bg-(--chat-bg) hover:text-(--text-primary)"
+                                  aria-label={`Open diff for ${file.path}`}
+                                >
+                                  <GitCompare className="h-3.5 w-3.5" />
+                                </button>
+                              </Tooltip>
+                              <Tooltip
+                                content={
+                                  canOpenReadOnly
+                                    ? "Open file"
+                                    : "Deleted file has no working copy"
+                                }
                               >
-                                <Copy className="h-3.5 w-3.5" />
-                              </button>
-                            </Tooltip>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedPath(file.path);
+                                    onOpenReadOnlyFile(file);
+                                  }}
+                                  {...telemetryClickAttributes("git.file.open", "git_panel")}
+                                  onDragStart={(event) => {
+                                    event.stopPropagation();
+                                    if (!sessionId || !canOpenReadOnly) {
+                                      event.preventDefault();
+                                      return;
+                                    }
+                                    setSelectedPath(file.path);
+                                    setWorkspaceFileDragData(event.dataTransfer, sessionId, "file", file.path, absolutePath);
+                                  }}
+                                  draggable={Boolean(sessionId && canOpenReadOnly)}
+                                  disabled={!canOpenReadOnly}
+                                  className="inline-flex rounded-md p-1 text-(--text-muted) hover:bg-(--chat-bg) hover:text-(--text-primary) disabled:pointer-events-none disabled:opacity-35"
+                                  aria-label={`Open file ${file.path}`}
+                                >
+                                  <FileText className="h-3.5 w-3.5" />
+                                </button>
+                              </Tooltip>
+                              <Tooltip content="Copy absolute path">
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    onCopyFilePath(file.path);
+                                  }}
+                                  {...telemetryClickAttributes("git.file.copy_path", "git_panel")}
+                                  className="inline-flex rounded-md p-1 text-(--text-muted) hover:bg-(--chat-bg) hover:text-(--text-primary)"
+                                  aria-label={`Copy absolute path for ${file.path}`}
+                                >
+                                  <Copy className="h-3.5 w-3.5" />
+                                </button>
+                              </Tooltip>
+                            </div>
                           </div>
                         </div>
                       );

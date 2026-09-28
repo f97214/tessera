@@ -1144,6 +1144,10 @@ export interface I18nMessages {
       closeComposer: string;
       reviewFiles: string;
       changedFiles: string;
+      showList: string;
+      showTree: string;
+      expandFolders: string;
+      collapseFolders: string;
       diffStatLabel: string;
       menuLabel: string;
       worktreeFallback: string;

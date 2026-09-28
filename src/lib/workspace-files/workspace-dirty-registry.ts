@@ -29,3 +29,10 @@ export function hasUnsavedWorkspaceFileEdits(
   if (!workspaceKey) return false;
   return dirtyPaths.has(key(workspaceKey, filePath));
 }
+
+/** Include drafts in descendants when deleting a folder. */
+export function hasUnsavedWorkspaceFileEditsUnder(workspaceKey: string | null, directory: string): boolean {
+  if (!workspaceKey) return false;
+  const prefix = key(workspaceKey, `${directory}/`);
+  return [...dirtyPaths].some((path) => path.startsWith(prefix));
+}

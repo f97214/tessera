@@ -52,4 +52,18 @@ test('restores after lazy loading, saves each session, and respects user scrolli
   assert.equal(viewport.scrollTop, 40, 'loading must not override user input');
   cleanup();
   assert.equal(saved, 40);
+
+  viewport.maxTop = 100;
+  const revealController = new AbortController();
+  cleanup = restoreWorkspaceFileScroll(
+    viewport as unknown as HTMLDivElement, 700, (value) => { saved = value; }, revealController.signal,
+  );
+  assert.equal(viewport.scrollTop, 100);
+  revealController.abort();
+  viewport.scrollTop = 25;
+  viewport.maxTop = 1000;
+  resize();
+  assert.equal(viewport.scrollTop, 25, 'active editor reveal takes over from saved scrolling');
+  cleanup();
+  assert.equal(saved, 25, 'persist the revealed row position, not the old scroll target');
 });

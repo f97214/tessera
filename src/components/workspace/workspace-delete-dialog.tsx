@@ -1,10 +1,12 @@
 "use client";
 
 import { LoaderCircle, TriangleAlert } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { telemetryClickAttributes } from '@/lib/telemetry/ui-click';
+
+import { deleteWorkspaceSelection } from "@/lib/workspace-files/delete-workspace-selection";
 
 export interface WorkspaceDeleteRequest {
   /** Workspace-relative path of the entry to delete. */
@@ -25,67 +27,83 @@ export function WorkspaceDeleteDialog({
   onConfirm,
   onOpenChange,
   request,
+  requests,
 }: {
   onConfirm: (request: WorkspaceDeleteRequest) => Promise<void>;
   onOpenChange: (open: boolean) => void;
   /** null when closed; the entry to delete otherwise. */
-  request: WorkspaceDeleteRequest | null;
+  request?: WorkspaceDeleteRequest | null;
+  requests?: readonly WorkspaceDeleteRequest[] | null;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const open = request !== null;
+  const entries = requests ?? (request ? [request] : []);
+  const open = entries.length > 0;
+  const completed = useRef(new Set<string>());
+  const remaining = entries.filter((entry) => !completed.current.has(entry.path));
+  const multiple = entries.length > 1;
+  const first = entries[0];
 
   useEffect(() => {
     if (!open) return;
+    completed.current = new Set();
     setError(null);
     setDeleting(false);
-  }, [open]);
+  }, [open, request, requests]);
 
   async function confirm() {
-    if (!request || deleting) return;
+    if (!open || deleting) return;
     setDeleting(true);
     setError(null);
     try {
-      await onConfirm(request);
-      onOpenChange(false);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Failed to delete.");
+      const result = await deleteWorkspaceSelection(remaining, onConfirm);
+      for (const path of result.deleted) completed.current.add(path);
+      if (result.failures.length) {
+        setError(result.failures.map(({ path, message }) => `${path}: ${message}`).join("\n"));
+      } else {
+        onOpenChange(false);
+      }
     } finally {
       setDeleting(false);
     }
   }
 
-  const name = request ? request.path.split("/").pop() || request.path : "";
+  function changeOpen(next: boolean) {
+    if (!deleting) onOpenChange(next);
+  }
+  const name = first ? first.path.split("/").pop() || first.path : "";
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={changeOpen}>
       <DialogContent aria-labelledby="dialog-title" data-testid="workspace-delete-dialog">
-        <DialogHeader onClose={() => onOpenChange(false)}>
+        <DialogHeader onClose={() => changeOpen(false)}>
           <DialogTitle>
-            {request?.kind === "directory" ? "Delete folder" : "Delete file"}
+            {multiple ? `Delete ${remaining.length} selected items` : first?.kind === "directory" ? "Delete folder" : "Delete file"}
           </DialogTitle>
         </DialogHeader>
         <div className="flex gap-3">
           <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-(--status-error-text)" />
           <div className="min-w-0 space-y-2">
             <p className="text-sm text-(--text-primary)">
-              Delete <span className="font-mono">{name}</span>?
+              {multiple ? `Delete these ${remaining.length} selected items?` : <>Delete <span className="font-mono">{name}</span>?</>}
             </p>
             <p className="text-xs leading-5 text-(--text-muted)" data-testid="workspace-delete-detail">
-              {request?.kind === "directory"
-                ? "Everything inside this folder is deleted too."
-                : "This file is deleted from the workspace."}
+              {entries.some((entry) => entry.kind === "directory")
+                ? multiple ? "All contents of the selected folders are deleted too." : "Everything inside this folder is deleted too."
+                : multiple ? "These files are deleted from the workspace." : "This file is deleted from the workspace."}
               {" "}
               This is permanent — it does not go to the Trash and cannot be undone.
-              {request?.dirty
-                ? " This file has unsaved edits, and they are discarded with it."
+              {entries.some((entry) => entry.dirty)
+                ? " Unsaved edits in the selected items will be discarded."
                 : ""}
             </p>
-            <p className="break-all font-mono text-[11px] text-(--text-muted)">{request?.path}</p>
+            <ul className="max-h-48 overflow-y-auto break-all font-mono text-[11px] text-(--text-muted)">
+              {remaining.map((entry) => <li key={entry.path}>{entry.path}</li>)}
+            </ul>
           </div>
         </div>
         {error ? (
-          <p className="mt-3 text-xs text-(--status-error-text)" data-testid="workspace-delete-error">
+          <p className="mt-3 max-h-32 overflow-y-auto whitespace-pre-wrap break-all text-xs text-(--status-error-text)" data-testid="workspace-delete-error">
             {error}
           </p>
         ) : null}
@@ -95,7 +113,8 @@ export function WorkspaceDeleteDialog({
             type="button"
             variant="ghost"
             size="sm"
-            onClick={() => onOpenChange(false)}
+            disabled={deleting}
+            onClick={() => changeOpen(false)}
           >
             Cancel
           </Button>

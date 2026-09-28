@@ -2,15 +2,11 @@
 
 import {
   AlertCircle,
-  ChevronRight,
   Eye,
   EyeOff,
   FilePlus2,
-  FileText,
-  FileJson,
-  ImageIcon,
-  Folder,
-  FolderOpen,
+  Files,
+  Trash2,
   FolderPlus,
   FolderTree,
   Link2,
@@ -26,6 +22,20 @@ import {
   useRef,
   useState,
 } from "react";
+import type { GitPanelData } from "@/types/git";
+import type { WorkspaceFileRef } from "@/lib/workspace-tabs/special-session";
+import { resolveRevealedWorkspacePath } from "@/lib/workspace-files/workspace-file-reveal";
+import { useWorkspaceFileReveal } from "@/hooks/use-workspace-file-reveal";
+import { buildWorkspaceGitDecorations } from "@/lib/workspace-files/workspace-git-decorations";
+import { WorkspaceGitBadge } from "./workspace-git-badge";
+import { useWorkspaceTreeSelection } from "./use-workspace-tree-selection";
+import { visibleWorkspaceTreeNodes, workspaceSelectionRoots } from "@/lib/workspace-files/workspace-tree-selection";
+import { WorkspaceTreeExpansionControls } from "./workspace-tree-expansion-controls";
+import { buildWorkspaceFileTree, type WorkspaceTreeNode } from "@/lib/workspace-files/workspace-file-tree";
+import {
+  WorkspaceFileIcon, WorkspaceFileName, WorkspaceTreeBranchGuide,
+  WorkspaceTreeDirectoryButton, WorkspaceTreeFileButton, workspaceTreeFileRowClassName,
+} from "./workspace-tree-row";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip } from "@/components/ui/tooltip";
 import {
@@ -71,7 +81,7 @@ import {
   deleteWorkspaceEntryRequest,
   renameWorkspaceEntryRequest,
 } from "@/lib/workspace-files/workspace-file-mutation-client";
-import { hasUnsavedWorkspaceFileEdits } from "@/lib/workspace-files/workspace-dirty-registry";
+import { hasUnsavedWorkspaceFileEdits, hasUnsavedWorkspaceFileEditsUnder } from "@/lib/workspace-files/workspace-dirty-registry";
 import {
   closeWorkspaceFileTabsFor,
   isPathUnderMutation,
@@ -85,124 +95,7 @@ import {
   type WorkspacePathContextMenuState,
 } from '@/lib/workspace-files/workspace-context-menu-state';
 
-interface WorkspaceFileNode {
-  type: "file";
-  name: string;
-  path: string;
-  isSymlink: boolean;
-}
-
-interface WorkspaceDirectoryNode {
-  type: "directory";
-  name: string;
-  path: string;
-  children: WorkspaceTreeNode[];
-}
-
-type WorkspaceTreeNode = WorkspaceDirectoryNode | WorkspaceFileNode;
-
-function WorkspaceFileIcon({ name }: { name: string }) {
-  const extension = name.split('.').pop()?.toLowerCase();
-  if (extension && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'avif'].includes(extension)) {
-    return <ImageIcon className="h-3.5 w-3.5 shrink-0 text-emerald-500" />;
-  }
-  if (extension === 'json') return <FileJson className="h-3.5 w-3.5 shrink-0 text-amber-500" />;
-  return <FileText className={cn('h-3.5 w-3.5 shrink-0', extension === 'md' ? 'text-sky-500' : 'text-(--text-secondary)')} />;
-}
-
-function WorkspaceFileName({ name }: { name: string }) {
-  const dot = name.lastIndexOf('.');
-  const hasExtension = dot > 0 && dot < name.length - 1;
-  return (
-    <span className="flex min-w-0 flex-1 text-[13px] leading-5">
-      <span className="truncate">{hasExtension ? name.slice(0, dot) : name}</span>
-      {hasExtension ? <span className="shrink-0">{name.slice(dot)}</span> : null}
-    </span>
-  );
-}
-
 type PathContextMenuState = WorkspacePathContextMenuState<WorkspaceTreeNode>;
-
-interface MutableDirectoryNode {
-  name: string;
-  path: string;
-  directories: Map<string, MutableDirectoryNode>;
-  files: WorkspaceFileNode[];
-}
-
-function createMutableDirectory(name: string, path: string): MutableDirectoryNode {
-  return {
-    name,
-    path,
-    directories: new Map(),
-    files: [],
-  };
-}
-
-function compareNodeNames(a: string, b: string): number {
-  return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
-}
-
-function finalizeDirectory(node: MutableDirectoryNode): WorkspaceDirectoryNode {
-  const directories = Array.from(node.directories.values())
-    .map(finalizeDirectory)
-    .sort((a, b) => compareNodeNames(a.name, b.name));
-  const files = [...node.files].sort((a, b) => compareNodeNames(a.name, b.name));
-  const children: WorkspaceTreeNode[] = [...directories, ...files];
-
-  return {
-    type: "directory",
-    name: node.name,
-    path: node.path,
-    children,
-  };
-}
-
-function ensureDirectory(root: MutableDirectoryNode, directoryPath: string): MutableDirectoryNode {
-  let directory = root;
-  for (const part of directoryPath.split("/").filter(Boolean)) {
-    const childPath = directory.path ? `${directory.path}/${part}` : part;
-    let child = directory.directories.get(part);
-    if (!child) {
-      child = createMutableDirectory(part, childPath);
-      directory.directories.set(part, child);
-    }
-    directory = child;
-  }
-  return directory;
-}
-
-function buildFileTree(
-  filePaths: string[],
-  symlinkPaths: Set<string>,
-  directoryPaths: string[],
-): WorkspaceTreeNode[] {
-  const root = createMutableDirectory("", "");
-
-  // Folders first and in their own right: one with no files in it appears in no
-  // file path, so inferring the tree from `filePaths` alone would hide exactly
-  // the folder a user just created.
-  for (const directoryPath of directoryPaths) {
-    ensureDirectory(root, directoryPath);
-  }
-
-  for (const filePath of filePaths) {
-    const parts = filePath.split("/").filter(Boolean);
-    const fileName = parts.pop();
-    if (!fileName) continue;
-
-    const directory = ensureDirectory(root, parts.join("/"));
-
-    directory.files.push({
-      type: "file",
-      name: fileName,
-      path: filePath,
-      isSymlink: symlinkPaths.has(filePath),
-    });
-  }
-
-  return finalizeDirectory(root).children;
-}
 
 function EmptyState({
   title,
@@ -234,9 +127,13 @@ function EmptyState({
 export function WorkspaceFilePanel({
   sessionId,
   worktreeId = null,
+  activeFileRef = null,
+  gitData = null,
 }: {
   sessionId: string | null;
   worktreeId?: string | null;
+  activeFileRef?: WorkspaceFileRef | null;
+  gitData?: GitPanelData | null;
 }) {
   const target = useMemo(
     () => resolveWorkspaceTarget(sessionId, worktreeId),
@@ -255,8 +152,7 @@ export function WorkspaceFilePanel({
   } | null>(null);
   const subscriberId = useStableWorkspaceFilesSubscriberId("workspace-file-panel");
   const [query, setQuery] = useState("");
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [deleteRequest, setDeleteRequest] = useState<WorkspaceDeleteRequest | null>(null);
+  const [deleteRequests, setDeleteRequests] = useState<WorkspaceDeleteRequest[] | null>(null);
   const [contextMenu, setContextMenu] = useState<PathContextMenuState | null>(null);
   const showHiddenFiles = useWorkspaceFileViewStore((state) => state.showHiddenFiles);
   const toggleShowHiddenFiles = useWorkspaceFileViewStore((state) => state.toggleShowHiddenFiles);
@@ -265,6 +161,7 @@ export function WorkspaceFilePanel({
   );
   const expandStoredPath = useWorkspaceFileViewStore((state) => state.expandPath);
   const toggleStoredPath = useWorkspaceFileViewStore((state) => state.toggleExpandedPath);
+  const setExpandedPaths = useWorkspaceFileViewStore((state) => state.setExpandedPaths);
   const expandedPaths = useMemo(() => new Set(storedExpandedPaths), [storedExpandedPaths]);
   // The sessions/[id]/files route scopes Project View references by projectId;
   // resolve it from canonical workspace state so linked Task-only Sessions can
@@ -352,14 +249,26 @@ export function WorkspaceFilePanel({
   });
 
   const isSearching = query.trim().length > 0;
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const scrollRestoreController = useRef<AbortController | null>(null);
+  const stopScrollRestore = useCallback(() => scrollRestoreController.current?.abort(), []);
   const scrollRef = useCallback((viewport: HTMLDivElement | null) => {
+    viewportRef.current = viewport;
     if (!viewport || !targetKey || isSearching) return;
+    const controller = new AbortController();
+    scrollRestoreController.current = controller;
     const store = useWorkspaceFileViewStore.getState();
-    return restoreWorkspaceFileScroll(
+    const cleanup = restoreWorkspaceFileScroll(
       viewport,
       store.scrollTopByWorkspace[targetKey] ?? 0,
       (scrollTop) => store.setScrollTop(targetKey, scrollTop),
+      controller.signal,
     );
+    return () => {
+      cleanup();
+      if (viewportRef.current === viewport) viewportRef.current = null;
+      if (scrollRestoreController.current === controller) scrollRestoreController.current = null;
+    };
   }, [targetKey, isSearching]);
   useEffect(function loadGlobalSearchResults() {
     const trimmed = query.trim();
@@ -452,9 +361,49 @@ export function WorkspaceFilePanel({
   }, [baseDirectories, query, visibleFiles]);
   const symlinkPaths = useMemo(() => new Set(listedSymlinks), [listedSymlinks]);
   const fileTree = useMemo(
-    () => buildFileTree(visibleFiles, symlinkPaths, visibleDirectories),
+    () => buildWorkspaceFileTree(visibleFiles, symlinkPaths, visibleDirectories),
     [symlinkPaths, visibleDirectories, visibleFiles],
   );
+
+  const visibleNodes = useMemo(() => visibleWorkspaceTreeNodes(fileTree, expandedPaths, isSearching), [fileTree, expandedPaths, isSearching]);
+  const visiblePaths = useMemo(() => visibleNodes.map((node) => node.path), [visibleNodes]);
+  const treeSelection = useWorkspaceTreeSelection(targetKey, visiblePaths);
+  const { selectPath: setSelectedPath } = treeSelection;
+  const selectedPath = treeSelection.selection.primary;
+  const selectedNodes = visibleNodes.filter((node) => treeSelection.selection.paths.has(node.path));
+  const selectedFiles = selectedNodes.filter((node) => node.type === "file");
+  const { cancelReveal } = useWorkspaceFileReveal({
+    workspaceKey: targetKey,
+    activePath: resolveRevealedWorkspacePath(target, activeFileRef),
+    visibleFiles, expandedPaths, loading, searching: isSearching, showHiddenFiles,
+    editing: Boolean(inlineInput.input), expandParent: expandPath,
+    selectPath: setSelectedPath, viewportRef, stopScrollRestore,
+  });
+  const gitDecorations = useMemo(() => gitData && workDir
+    ? buildWorkspaceGitDecorations({
+      changedFiles: gitData.changedFiles, repoRoot: gitData.repoRoot,
+      workspaceRoot: workDir, truncated: gitData.changedFilesTruncated,
+    }) : null, [gitData, workDir]);
+
+
+  function openSelectedFiles() {
+    cancelReveal();
+    if (!target) return;
+    for (const node of selectedFiles) {
+      openWorkspaceTargetFileTab(target, "file", node.path, { projectDir: sessionProjectDir });
+    }
+  }
+
+  function requestSelectedDelete() {
+    cancelReveal();
+    const requests = workspaceSelectionRoots(selectedNodes.map(deleteRequestFor));
+    if (requests.length) setDeleteRequests(requests);
+  }
+
+  function collapseAllFolders() {
+    cancelReveal();
+    if (targetKey) setExpandedPaths(targetKey, []);
+  }
 
   // Expand the ancestors, or an entry created inside a collapsed folder appears
   // to have done nothing.
@@ -559,9 +508,7 @@ export function WorkspaceFilePanel({
       // The tab has to go with the file: leaving it open shows an editable buffer
       // for a path that no longer exists.
       closeWorkspaceFileTabsFor(target, request.path);
-      if (selectedPath && isPathUnderMutation(selectedPath, request.path)) {
-        setSelectedPath(null);
-      }
+      treeSelection.removePath(request.path);
       await loadDirectory(request.path.split("/").slice(0, -1).join("/"), {
         silent: true,
         mutation: { kind: request.kind, path: request.path, type: "delete" },
@@ -615,6 +562,7 @@ export function WorkspaceFilePanel({
 
   /** Named apart from the hook's `startRename` to keep row event handling local. */
   function beginRename(node: WorkspaceTreeNode) {
+    cancelReveal();
     if (!canMutate) return;
     inlineInput.startRename({
       isDirectory: node.type === "directory",
@@ -643,11 +591,14 @@ export function WorkspaceFilePanel({
     if (!nextContextMenu) return;
     event.preventDefault();
     event.stopPropagation();
+    cancelReveal();
+    treeSelection.selectContextPath(node.path);
     setContextMenu(nextContextMenu);
   }
 
   /** Right-click past the last row: the actions that need no row. */
   function openBackgroundContextMenu(event: MouseEvent) {
+    cancelReveal();
     const rootPath = toAbsoluteWorkspacePath(workDir, "");
     const nextContextMenu = buildWorkspacePathContextMenuState<WorkspaceTreeNode>({
       absolutePath: rootPath,
@@ -663,7 +614,7 @@ export function WorkspaceFilePanel({
 
   /** A folder takes its contents with it; a file may take an unsaved draft. */
   function deleteRequestFor(node: WorkspaceTreeNode): WorkspaceDeleteRequest {
-    if (node.type === "directory") return { kind: "directory", path: node.path };
+    if (node.type === "directory") return { kind: "directory", path: node.path, dirty: hasUnsavedWorkspaceFileEditsUnder(targetKey, node.path) };
     return {
       kind: "file",
       path: node.path,
@@ -679,6 +630,7 @@ export function WorkspaceFilePanel({
   }
 
   function beginNewEntry(kind: "file" | "folder", parentPath: string) {
+    cancelReveal();
     if (!canMutate) return;
     inlineInput.startNew(kind, parentPath);
   }
@@ -706,12 +658,9 @@ export function WorkspaceFilePanel({
   }
 
   function renderTreeNode(node: WorkspaceTreeNode, depth: number): ReactNode {
-    const paddingLeft = 8 + depth * 12;
-
     if (node.type === "directory") {
       const expanded = isSearching || expandedPaths.has(node.path);
       const directoryLoading = loadingDirectorySet.has(node.path);
-      const FolderIcon = expanded ? FolderOpen : Folder;
       const absolutePath = toAbsoluteWorkspacePath(workDir, node.path);
       const children = (
         <>
@@ -734,61 +683,51 @@ export function WorkspaceFilePanel({
 
       return (
         <div key={`dir:${node.path}`} className="flex flex-col">
-          <div className={cn("group flex min-w-0 items-center transition-colors hover:bg-(--sidebar-hover)", selectedPath === node.path && "bg-(--accent)/10")}>
-          <button
+          <div className={cn("group flex min-w-0 items-center transition-colors hover:bg-(--sidebar-hover)", treeSelection.selection.paths.has(node.path) && "bg-(--accent)/10")}>
+          <WorkspaceTreeDirectoryButton
+            name={node.name}
+            decoration={<WorkspaceGitBadge decoration={gitDecorations?.directories.get(node.path) ?? gitDecorations?.files.get(node.path)} directory />}
+            depth={depth}
+            expanded={expanded}
+            loading={directoryLoading}
+            nameProps={{
+              onDoubleClick: (event) => {
+                if (!canMutate || !directoryRenameDoubleClickRef.current?.qualified) return;
+                if (event.ctrlKey || event.metaKey || event.shiftKey || treeSelection.selection.paths.size > 1) return;
+                event.stopPropagation();
+                beginRename(node);
+              },
+            }}
             type="button"
             {...telemetryClickAttributes("files.directory.toggle", "files_panel")}
             onClick={(event) => {
-              setSelectedPath(node.path);
+              cancelReveal();
+              if (treeSelection.selectWithModifiers(node.path, event)) return;
               handleDirectoryClick(event, node.path);
             }}
             onKeyDown={(event) => {
-              if (!canMutate || event.key !== "F2") return;
+              if (!canMutate || treeSelection.selection.paths.size > 1 || event.key !== "F2") return;
               event.preventDefault();
               beginRename(node);
             }}
             onContextMenu={(event) => openRowContextMenu(event, node, absolutePath)}
             onDragStart={(event) => {
+              cancelReveal();
               if (!sessionId) return;
               setWorkspaceDirectoryDragData(event.dataTransfer, sessionId, node.path, absolutePath);
             }}
             draggable={Boolean(sessionId)}
-            className="flex h-7 min-w-0 flex-1 items-center gap-1.5 border-l-2 border-l-transparent pr-2 text-left text-(--text-primary) transition-colors focus-visible:outline-1 focus-visible:outline-(--accent) focus-visible:-outline-offset-1"
-            style={{ paddingLeft }}
             title={node.path}
-            aria-expanded={expanded}
-          >
-            <ChevronRight
-              className={cn(
-                "h-3.5 w-3.5 shrink-0 text-(--text-muted) transition-transform",
-                expanded && "rotate-90",
-              )}
-            />
-            <FolderIcon className="h-3.5 w-3.5 shrink-0 text-(--text-secondary)" />
-            <span
-              // The name alone owns rename, with a tighter threshold than the
-              // browser's native double-click setting.
-              onDoubleClick={(event) => {
-                if (!canMutate) return;
-                if (!directoryRenameDoubleClickRef.current?.qualified) return;
-                event.stopPropagation();
-                beginRename(node);
-              }}
-              className="min-w-0 flex-1 truncate text-[13px] leading-5"
-            >
-              {node.name}
-            </span>
-            {directoryLoading ? (
-              <LoaderCircle className="h-3 w-3 shrink-0 animate-spin text-(--text-muted)" />
-            ) : null}
-          </button>
+            aria-pressed={treeSelection.selection.paths.has(node.path)}
+            data-testid={`workspace-directory-row-${node.path}`}
+          />
           </div>
-          {expanded ? <div className="relative"><span aria-hidden="true" className="pointer-events-none absolute inset-y-0 w-px bg-(--divider)" style={{ left: paddingLeft + 9 }} />{children}</div> : null}
+          {expanded ? <div className="relative"><WorkspaceTreeBranchGuide depth={depth} />{children}</div> : null}
         </div>
       );
     }
 
-    const isSelected = node.path === selectedPath;
+    const isSelected = treeSelection.selection.paths.has(node.path);
     const absolutePath = toAbsoluteWorkspacePath(workDir, node.path);
 
     if (inlineInput.isRenaming(node.path)) {
@@ -798,34 +737,28 @@ export function WorkspaceFilePanel({
     return (
       <div
         key={`file:${node.path}`}
-        className={cn(
-          "group relative border-l-2 transition-colors",
-          isSelected
-            ? "border-l-(--accent) bg-(--accent)/10 text-(--text-primary)"
-            : "border-l-transparent text-(--text-primary) hover:bg-(--sidebar-hover)",
-        )}
-        onContextMenu={(event) => {
-          setSelectedPath(node.path);
-          openRowContextMenu(event, node, absolutePath);
-        }}
+        className={workspaceTreeFileRowClassName(isSelected)}
+        onContextMenu={(event) => openRowContextMenu(event, node, absolutePath)}
       >
-        <button
+        <WorkspaceTreeFileButton
+          depth={depth}
           type="button"
           {...telemetryClickAttributes("files.file.open", "files_panel")}
           onClick={(event) => {
-            setSelectedPath(node.path);
+            cancelReveal();
+              if (treeSelection.selectWithModifiers(node.path, event)) return;
             if (!target) return;
             // A browser double-click also dispatches two click events. The
             // first click opens the replaceable file-preview tab; its paired
             // double-click below promotes that preview to a retained tab.
-            if (!shouldOpenOnRowClick(event.detail)) return;
+            if (event.detail !== 0 && !shouldOpenOnRowClick(event.detail)) return;
             previewWorkspaceTargetFileTab(target, 'file', node.path, {
               preferKanbanPeek: true,
               projectDir: sessionProjectDir,
             });
           }}
-          onDoubleClick={() => {
-            if (!target) return;
+          onDoubleClick={(event) => {
+            if (!target || event.ctrlKey || event.metaKey || event.shiftKey) return;
             openWorkspaceTargetFileTab(target, 'file', node.path, {
               preferKanbanPeek: true,
               projectDir: sessionProjectDir,
@@ -834,20 +767,21 @@ export function WorkspaceFilePanel({
           onKeyDown={(event) => {
             // F2, not Enter: Enter already activates the row, and taking that
             // to mean rename would stop the keyboard opening a file at all.
-            if (!canMutate || event.key !== "F2") return;
+            if (!canMutate || treeSelection.selection.paths.size > 1 || event.key !== "F2") return;
             event.preventDefault();
             beginRename(node);
           }}
           onDragStart={(event) => {
+            cancelReveal();
             if (!target) return;
-            setSelectedPath(node.path);
+            treeSelection.selectContextPath(node.path);
             setWorkspaceTargetFileDragData(event.dataTransfer, target, "file", node.path, absolutePath);
           }}
           draggable={Boolean(target)}
-          className="flex h-7 w-full min-w-0 items-center gap-1.5 pr-2 text-left transition-colors focus-visible:outline-1 focus-visible:outline-(--accent) focus-visible:-outline-offset-1"
-          style={{ paddingLeft: paddingLeft + 20 }}
           title={node.isSymlink ? `${node.path} (symbolic link)` : node.path}
+          aria-pressed={isSelected}
           data-testid={`workspace-file-row-${node.path}`}
+          data-workspace-file-path={node.path}
           data-symlink={node.isSymlink ? "true" : undefined}
         >
           {node.isSymlink ? (
@@ -859,7 +793,8 @@ export function WorkspaceFilePanel({
             <WorkspaceFileIcon name={node.name} />
           )}
           <WorkspaceFileName name={node.name} />
-        </button>
+          <WorkspaceGitBadge decoration={gitDecorations?.files.get(node.path)} />
+        </WorkspaceTreeFileButton>
       </div>
     );
   }
@@ -983,17 +918,46 @@ export function WorkspaceFilePanel({
             <span className="text-[11px] font-medium text-(--text-secondary)">
               Workspace files
             </span>
-            <span className="font-mono text-[11px] text-(--text-muted) tabular-nums">
-              {visibleFiles.length.toLocaleString()}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-[11px] text-(--text-muted) tabular-nums">
+                {visibleFiles.length.toLocaleString()}
+              </span>
+              <WorkspaceTreeExpansionControls
+                disabled={isSearching || !targetKey || baseDirectories.length === 0}
+                onCollapseAll={collapseAllFolders}
+              />
+            </div>
           </div>
-          <ScrollArea key={targetKey} ref={scrollRef} className="min-h-0 flex-1">
+          {selectedNodes.length > 1 ? (
+            <div className="flex items-center gap-2 px-3 py-1 text-xs text-(--text-secondary)" data-testid="workspace-selection-actions">
+              <span className="min-w-0 flex-1">{selectedNodes.length} selected</span>
+              <button type="button" className="rounded p-1 hover:bg-(--sidebar-hover) disabled:opacity-40" disabled={!selectedFiles.length}
+                onClick={openSelectedFiles} aria-label="Open selected files" title="Open selected files"><Files className="h-3.5 w-3.5" /></button>
+              <button type="button" className="rounded p-1 text-(--status-error-text) hover:bg-(--sidebar-hover)"
+                onClick={requestSelectedDelete} aria-label="Delete selected items" title="Delete selected items"><Trash2 className="h-3.5 w-3.5" /></button>
+            </div>
+          ) : null}
+          {gitDecorations?.partial ? <p className="px-3 text-xs text-(--text-muted)">Git status is incomplete because the change list was truncated.</p> : null}
+          <ScrollArea key={targetKey} ref={scrollRef} className="min-h-0 flex-1" onWheel={cancelReveal} onTouchStart={cancelReveal}>
             {/* The rows stop their own context menu, so this one only ever
                 fires on the empty space past the last row. */}
             <div
               className="flex min-h-full flex-col"
               onContextMenu={openBackgroundContextMenu}
               data-testid="workspace-file-tree"
+              onKeyDown={(event) => {
+                if (inlineInput.input || event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+                if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  cancelReveal();
+                  treeSelection.selectAll();
+                } else if (event.key === "Delete" && selectedNodes.length) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  requestSelectedDelete();
+                }
+              }}
             >
               {inlineInput.newEntryParent === "" ? renderInlineInputRow(0) : null}
               {fileTree.map((node) => renderTreeNode(node, 0))}
@@ -1005,9 +969,14 @@ export function WorkspaceFilePanel({
         <WorkspaceFileContextMenu
           absolutePath={contextMenu.absolutePath}
           canOpenFile={contextMenu.canOpenFile}
+          selectionActions={canMutate && contextMenu.node && treeSelection.selection.paths.has(contextMenu.node.path) && selectedNodes.length > 1 ? {
+            count: selectedNodes.length,
+            onOpen: selectedFiles.length ? openSelectedFiles : undefined,
+            onDelete: requestSelectedDelete,
+          } : undefined}
           entryActions={canMutate ? {
             onDelete: contextMenu.node
-              ? () => setDeleteRequest(deleteRequestFor(contextMenu.node!))
+              ? () => setDeleteRequests([deleteRequestFor(contextMenu.node!)])
               : undefined,
             onNewFile: () => beginNewEntry("file", newEntryParentFor(contextMenu.node)),
             onNewFolder: () => beginNewEntry("folder", newEntryParentFor(contextMenu.node)),
@@ -1022,9 +991,9 @@ export function WorkspaceFilePanel({
       <WorkspaceDeleteDialog
         onConfirm={deleteEntry}
         onOpenChange={(next) => {
-          if (!next) setDeleteRequest(null);
+          if (!next) setDeleteRequests(null);
         }}
-        request={deleteRequest}
+        requests={deleteRequests}
       />
     </div>
   );

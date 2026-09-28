@@ -33,6 +33,11 @@ interface WorkspaceFileContextMenuProps {
   absolutePath: string;
   canOpenFile?: boolean;
   entryActions?: WorkspaceEntryMenuActions;
+  selectionActions?: {
+    count: number;
+    onOpen?: () => void;
+    onDelete: () => void;
+  };
   onClose: () => void;
   position: { x: number; y: number };
 }
@@ -45,17 +50,18 @@ export function WorkspaceFileContextMenu({
   absolutePath,
   canOpenFile = true,
   entryActions,
+  selectionActions,
   onClose,
   position,
 }: WorkspaceFileContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const hasElectronFileActions = canUseElectronFileActions();
   const revealLabel = getRevealFileLabel(getElectronPlatform());
-  const itemCount = (hasElectronFileActions ? 3 : 1)
+  const itemCount = selectionActions ? (selectionActions.onOpen ? 2 : 1) : (hasElectronFileActions ? 3 : 1)
     + (entryActions ? 2 : 0)
     + (entryActions?.onRename ? 1 : 0)
     + (entryActions?.onDelete ? 1 : 0);
-  const separatorCount = (hasElectronFileActions ? 1 : 0)
+  const separatorCount = selectionActions ? 0 : (hasElectronFileActions ? 1 : 0)
     + (entryActions ? 1 : 0)
     + (entryActions?.onRename || entryActions?.onDelete ? 1 : 0);
 
@@ -150,6 +156,22 @@ export function WorkspaceFileContextMenu({
       onKeyDown={handleMenuKeyDown}
       data-testid="workspace-file-context-menu"
     >
+      {selectionActions ? (
+        <>
+          {selectionActions.onOpen ? (
+            <button type="button" role="menuitem" className={menuItemClassName}
+              onClick={run(selectionActions.onOpen)} data-testid="workspace-context-open-selected">
+              <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+              <span>Open selected files</span>
+            </button>
+          ) : null}
+          <button type="button" role="menuitem" className={destructiveItemClassName}
+            onClick={run(selectionActions.onDelete)} data-testid="workspace-context-delete-selected">
+            <Trash2 className="h-3.5 w-3.5 shrink-0" />
+            <span>Delete {selectionActions.count} selected items</span>
+          </button>
+        </>
+      ) : <>
       {entryActions ? (
         <>
           <button
@@ -240,6 +262,7 @@ export function WorkspaceFileContextMenu({
           <span>Delete</span>
         </button>
       ) : null}
+      </>}
     </div>,
     document.body,
   );
