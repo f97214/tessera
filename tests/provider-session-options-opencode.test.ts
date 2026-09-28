@@ -6,6 +6,11 @@ import {
   type OpenCodeCommandRunner,
 } from '@/lib/cli/provider-session-options-opencode';
 import { mergeCustomModelIds } from '@/lib/cli/provider-session-custom-models';
+import {
+  getProviderSessionOptions,
+  invalidateProviderSessionOptionsCache,
+  type ProviderSessionOptionsDiscovery,
+} from '@/lib/cli/provider-session-options';
 import type { ExecResult } from '@/lib/cli/cli-exec';
 
 interface RunnerCall {
@@ -54,6 +59,41 @@ const LEGACY_MODEL = [
   '}',
 ].join('\n');
 
+const API_CATALOG_WITH_ONE_MODEL = JSON.stringify({
+  location: { directory: '<PROJECT>' },
+  data: [{
+    providerID: 'opencode-go',
+    id: 'glm-5.3-flash',
+    name: 'GLM-5.3-Flash',
+    variants: [
+      { id: 'low', settings: { reasoningEffort: 'low' } },
+      { id: 'high', settings: { reasoningEffort: 'high' } },
+      { id: 'max', settings: { reasoningEffort: 'max' } },
+    ],
+  }],
+});
+
+// OpenCode 2.x answers the first catalog query for a directory before its providers load.
+const API_CATALOG_NOT_LOADED_YET = '{"location":{"directory":"<PROJECT>"},"data":[]}';
+
+function fakeTiming(options: { commandDurationMs?: number } = {}) {
+  let nowMs = 0;
+  const waits: number[] = [];
+  return {
+    waits,
+    advance: () => {
+      nowMs += options.commandDurationMs ?? 0;
+    },
+    timing: {
+      now: () => nowMs,
+      wait: async (ms: number) => {
+        waits.push(ms);
+        nowMs += ms;
+      },
+    },
+  };
+}
+
 test('a valid legacy catalog stays primary and skips the API probe', async () => {
   const stub = stubRunner([result({ stdout: LEGACY_MODEL })]);
 
@@ -87,7 +127,7 @@ for (const scenario of [
   test(`${scenario.name} invokes the API with the same environment and timeout`, async () => {
     const stub = stubRunner([
       scenario.legacy,
-      result({ stdout: '{"location":{"directory":"<PROJECT>"},"data":[]}' }),
+      result({ stdout: API_CATALOG_WITH_ONE_MODEL }),
     ]);
 
     await loadOpenCodeSessionOptions('wsl', stub.runner);
@@ -108,6 +148,73 @@ for (const scenario of [
     ]);
   });
 }
+
+test('an API catalog that is empty on the first query is retried once providers load', async () => {
+  const clock = fakeTiming();
+  const stub = stubRunner([
+    result({ ok: false, exitCode: 1, stderr: 'Unrecognized flag: --verbose' }),
+    result({ stdout: API_CATALOG_NOT_LOADED_YET }),
+    result({ stdout: API_CATALOG_WITH_ONE_MODEL }),
+  ]);
+
+  const options = await loadOpenCodeSessionOptions('native', stub.runner, clock.timing);
+
+  assert.deepEqual(options.modelOptions.map((model) => model.value), [
+    'opencode-go/glm-5.3-flash',
+  ]);
+  assert.deepEqual(
+    options.modelOptions[0]?.supportedReasoningEfforts.map((effort) => effort.label),
+    ['Default', 'Low', 'High', 'Max'],
+  );
+  assert.deepEqual(stub.calls.map((call) => call.args.join(' ')), [
+    'models --verbose',
+    'api model.list',
+    'api model.list',
+  ]);
+  assert.deepEqual(clock.waits, [500]);
+});
+
+test('a persistently empty API catalog is queried three times and resolves empty', async () => {
+  const clock = fakeTiming();
+  const stub = stubRunner([
+    result({ ok: false, exitCode: 1 }),
+    result({ stdout: API_CATALOG_NOT_LOADED_YET }),
+    result({ stdout: API_CATALOG_NOT_LOADED_YET }),
+    result({ stdout: API_CATALOG_NOT_LOADED_YET }),
+  ]);
+
+  const options = await loadOpenCodeSessionOptions('native', stub.runner, clock.timing);
+
+  assert.deepEqual(options.modelOptions, []);
+  assert.deepEqual(stub.calls.map((call) => call.timeoutMs), [10_000, 10_000, 9_500, 9_000]);
+  assert.deepEqual(clock.waits, [500, 500]);
+});
+
+test('API retries use only the remaining 10,000 ms budget', async () => {
+  const clock = fakeTiming({ commandDurationMs: 6_000 });
+  const stub = stubRunner([
+    result({ ok: false, exitCode: 1 }),
+    result({ stdout: API_CATALOG_NOT_LOADED_YET }),
+    result({ stdout: API_CATALOG_NOT_LOADED_YET }),
+  ]);
+
+  // The legacy probe runs before the API budget starts, so only API calls advance this clock.
+  let apiCalls = 0;
+  const runner: OpenCodeCommandRunner = async (command, args, environment, timeoutMs) => {
+    const output = await stub.runner(command, args, environment, timeoutMs);
+    if (args[0] === 'api') {
+      apiCalls += 1;
+      clock.advance();
+    }
+    return output;
+  };
+
+  const options = await loadOpenCodeSessionOptions('native', runner, clock.timing);
+
+  assert.deepEqual(options.modelOptions, []);
+  assert.equal(apiCalls, 2);
+  assert.deepEqual(stub.calls.map((call) => call.timeoutMs), [10_000, 10_000, 3_500]);
+});
 
 test('API models preserve valid identity, label, order, and first-default semantics', () => {
   const models = parseOpenCodeApiModels(JSON.stringify({
@@ -288,4 +395,63 @@ test('custom model IDs remain available after discovered catalog failure', async
     defaultReasoningEffort: null,
     supportedReasoningEfforts: [],
   }]);
+});
+
+function countingDiscovery(modelValues: string[]): {
+  discover: ProviderSessionOptionsDiscovery;
+  calls: string[];
+} {
+  const calls: string[] = [];
+  return {
+    calls,
+    discover: async (providerId, agentEnvironment) => {
+      calls.push(`${providerId}:${agentEnvironment}`);
+      return {
+        providerId,
+        modelOptions: modelValues.map((value, index) => ({
+          value,
+          label: value,
+          isDefault: index === 0,
+          defaultReasoningEffort: null,
+          supportedReasoningEfforts: [],
+        })),
+        accessOptions: [],
+        modeOptions: [],
+      } as unknown as Awaited<ReturnType<ProviderSessionOptionsDiscovery>>;
+    },
+  };
+}
+
+test('an empty discovered OpenCode catalog is probed again on the next request', async () => {
+  invalidateProviderSessionOptionsCache();
+  const discovery = countingDiscovery([]);
+
+  await getProviderSessionOptions('opencode', undefined, 'native', discovery.discover);
+  await getProviderSessionOptions('opencode', undefined, 'native', discovery.discover);
+
+  assert.deepEqual(discovery.calls, ['opencode:native', 'opencode:native']);
+  invalidateProviderSessionOptionsCache();
+});
+
+test('a non-empty discovered OpenCode catalog stays cached', async () => {
+  invalidateProviderSessionOptionsCache();
+  const discovery = countingDiscovery(['opencode-go/glm-5.3-flash']);
+
+  const first = await getProviderSessionOptions('opencode', undefined, 'native', discovery.discover);
+  const second = await getProviderSessionOptions('opencode', undefined, 'native', discovery.discover);
+
+  assert.deepEqual(discovery.calls, ['opencode:native']);
+  assert.equal(second, first);
+  invalidateProviderSessionOptionsCache();
+});
+
+test('other providers keep caching an empty discovered catalog', async () => {
+  invalidateProviderSessionOptionsCache();
+  const discovery = countingDiscovery([]);
+
+  await getProviderSessionOptions('claude-code', undefined, 'native', discovery.discover);
+  await getProviderSessionOptions('claude-code', undefined, 'native', discovery.discover);
+
+  assert.deepEqual(discovery.calls, ['claude-code:native']);
+  invalidateProviderSessionOptionsCache();
 });

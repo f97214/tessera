@@ -33,10 +33,18 @@ export type {
   ProviderSessionOptions,
 } from './provider-session-option-types';
 
+/** Probes a provider's options before custom models are merged; injectable for tests. */
+export type ProviderSessionOptionsDiscovery = (
+  providerId: string,
+  agentEnvironment: AgentEnvironment | 'static',
+  userId?: string,
+) => Promise<ProviderSessionOptions>;
+
 export async function getProviderSessionOptions(
   providerId: string,
   userId?: string,
   agentEnvironmentOverride?: AgentEnvironment,
+  discover: ProviderSessionOptionsDiscovery = discoverProviderSessionOptions,
 ): Promise<ProviderSessionOptions> {
   const agentEnvironment = await getSessionOptionsAgentEnvironment(
     providerId,
@@ -54,12 +62,14 @@ export async function getProviderSessionOptions(
     return pending;
   }
 
-  const loader = loadProviderSessionOptions(providerId, userId, agentEnvironment)
-    .then((value) => {
-      cache.set(cacheKey, {
-        value,
-        expiresAt: Date.now() + CACHE_TTL_MS,
-      });
+  const loader = loadProviderSessionOptions(providerId, userId, agentEnvironment, discover)
+    .then(({ value, cacheable }) => {
+      if (cacheable) {
+        cache.set(cacheKey, {
+          value,
+          expiresAt: Date.now() + CACHE_TTL_MS,
+        });
+      }
       inflight.delete(cacheKey);
       return value;
     })
@@ -112,36 +122,46 @@ function buildCacheKey(
   return `${providerId}:${userId ?? 'anonymous'}:${agentEnvironment}`;
 }
 
-async function loadProviderSessionOptions(
+async function discoverProviderSessionOptions(
   providerId: string,
+  agentEnvironment: AgentEnvironment | 'static',
   userId?: string,
-  agentEnvironment?: AgentEnvironment | 'static',
 ): Promise<ProviderSessionOptions> {
-  let sessionOptions: ProviderSessionOptions;
   if (providerId === 'codex') {
-    sessionOptions = await loadCodexSessionOptions(
+    return loadCodexSessionOptions(
       userId,
       agentEnvironment === 'static' ? undefined : agentEnvironment,
     );
-  } else if (providerId === 'opencode') {
-    sessionOptions = await loadOpenCodeSessionOptions(
-      agentEnvironment === 'static' || !agentEnvironment ? 'native' : agentEnvironment,
-    );
-  } else {
-    sessionOptions = await loadClaudeSessionOptions(
-      agentEnvironment === 'static' || !agentEnvironment ? 'native' : agentEnvironment,
-    );
   }
+  if (providerId === 'opencode') {
+    return loadOpenCodeSessionOptions(agentEnvironment === 'static' ? 'native' : agentEnvironment);
+  }
+  return loadClaudeSessionOptions(agentEnvironment === 'static' ? 'native' : agentEnvironment);
+}
+
+async function loadProviderSessionOptions(
+  providerId: string,
+  userId: string | undefined,
+  agentEnvironment: AgentEnvironment | 'static',
+  discover: ProviderSessionOptionsDiscovery,
+): Promise<{ value: ProviderSessionOptions; cacheable: boolean }> {
+  const sessionOptions = await discover(providerId, agentEnvironment, userId);
+  // An empty OpenCode catalog usually means its providers were still loading; probe again
+  // on the next request instead of serving the empty list for the whole cache lifetime.
+  const cacheable = providerId !== 'opencode' || sessionOptions.modelOptions.length > 0;
 
   if (!userId) {
-    return sessionOptions;
+    return { value: sessionOptions, cacheable };
   }
 
   const settings = await SettingsManager.load(userId, { silent: true });
-  return mergeCustomModelIds(
-    sessionOptions,
-    settings.providerCustomModels[providerId],
-  );
+  return {
+    value: mergeCustomModelIds(
+      sessionOptions,
+      settings.providerCustomModels[providerId],
+    ),
+    cacheable,
+  };
 }
 
 export function getProviderPermissionMapping(

@@ -12,6 +12,10 @@ import type {
 import { OPENCODE_DEFAULT_REASONING_EFFORT } from './providers/opencode/session-config';
 
 const OPENCODE_MODEL_PROBE_TIMEOUT_MS = 10_000;
+// OpenCode 2.x loads providers per directory on the first catalog query and answers that
+// query with an empty `data` array; the next query ~0.3-0.6 s later returns the catalog.
+const OPENCODE_EMPTY_CATALOG_RETRIES = 2;
+const OPENCODE_EMPTY_CATALOG_RETRY_DELAY_MS = 500;
 
 interface OpenCodeVerboseModel {
   id?: string;
@@ -36,9 +40,20 @@ export type OpenCodeCommandRunner = (
   timeoutMs: number,
 ) => Promise<ExecResult>;
 
+export interface OpenCodeProbeTiming {
+  now: () => number;
+  wait: (ms: number) => Promise<void>;
+}
+
+const REAL_TIMING: OpenCodeProbeTiming = {
+  now: () => Date.now(),
+  wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
 export async function loadOpenCodeSessionOptions(
   agentEnvironment: AgentEnvironment,
   runCommand: OpenCodeCommandRunner = execCli,
+  timing: OpenCodeProbeTiming = REAL_TIMING,
 ): Promise<ProviderSessionOptions> {
   const modelResult = await runCommand(
     'opencode',
@@ -52,18 +67,38 @@ export async function loadOpenCodeSessionOptions(
     : [];
 
   if (modelOptions.length === 0) {
-    const apiResult = await runCommand(
-      'opencode',
-      ['api', 'model.list'],
-      agentEnvironment,
-      OPENCODE_MODEL_PROBE_TIMEOUT_MS,
-    );
-    modelOptions = apiResult.ok
-      ? parseOpenCodeApiModels(apiResult.stdout)
-      : [];
+    modelOptions = await probeOpenCodeApiModels(agentEnvironment, runCommand, timing);
   }
 
   return buildOpenCodeSessionOptions(modelOptions);
+}
+
+async function probeOpenCodeApiModels(
+  agentEnvironment: AgentEnvironment,
+  runCommand: OpenCodeCommandRunner,
+  timing: OpenCodeProbeTiming,
+): Promise<ProviderModelOption[]> {
+  const deadline = timing.now() + OPENCODE_MODEL_PROBE_TIMEOUT_MS;
+  let timeoutMs = OPENCODE_MODEL_PROBE_TIMEOUT_MS;
+  for (let retry = 0; ; retry += 1) {
+    const apiResult = await runCommand('opencode', ['api', 'model.list'], agentEnvironment, timeoutMs);
+    if (!apiResult.ok) return [];
+    if (retry >= OPENCODE_EMPTY_CATALOG_RETRIES || !isEmptyOpenCodeApiCatalog(apiResult.stdout)) {
+      return parseOpenCodeApiModels(apiResult.stdout);
+    }
+    await timing.wait(OPENCODE_EMPTY_CATALOG_RETRY_DELAY_MS);
+    timeoutMs = deadline - timing.now();
+    if (timeoutMs <= 0) return [];
+  }
+}
+
+function isEmptyOpenCodeApiCatalog(stdout: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    return isRecord(parsed) && Array.isArray(parsed.data) && parsed.data.length === 0;
+  } catch {
+    return false;
+  }
 }
 
 export function parseOpenCodeApiModels(stdout: string): ProviderModelOption[] {
