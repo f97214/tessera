@@ -2,7 +2,7 @@ import {
   OPENCODE_ACCESS_OPTIONS,
   OPENCODE_MODE_OPTIONS,
 } from './provider-session-option-definitions';
-import { execCli } from './cli-exec';
+import { execCli, type ExecResult } from './cli-exec';
 import type { AgentEnvironment } from '../settings/types';
 import type {
   ProviderModelOption,
@@ -20,21 +20,86 @@ interface OpenCodeVerboseModel {
   variants?: Record<string, unknown>;
 }
 
+interface OpenCodeApiModelEntry {
+  providerID?: unknown;
+  id?: unknown;
+  modelID?: unknown;
+  name?: unknown;
+  enabled?: unknown;
+  variants?: unknown;
+}
+
+export type OpenCodeCommandRunner = (
+  command: string,
+  args: string[],
+  environment: AgentEnvironment,
+  timeoutMs: number,
+) => Promise<ExecResult>;
+
 export async function loadOpenCodeSessionOptions(
   agentEnvironment: AgentEnvironment,
+  runCommand: OpenCodeCommandRunner = execCli,
 ): Promise<ProviderSessionOptions> {
-  const modelResult = await execCli(
+  const modelResult = await runCommand(
     'opencode',
     ['models', '--verbose'],
     agentEnvironment,
     OPENCODE_MODEL_PROBE_TIMEOUT_MS,
   );
 
-  const modelOptions = modelResult.ok
+  let modelOptions = modelResult.ok
     ? parseOpenCodeVerboseModels(modelResult.stdout)
     : [];
 
+  if (modelOptions.length === 0) {
+    const apiResult = await runCommand(
+      'opencode',
+      ['api', 'model.list'],
+      agentEnvironment,
+      OPENCODE_MODEL_PROBE_TIMEOUT_MS,
+    );
+    modelOptions = apiResult.ok
+      ? parseOpenCodeApiModels(apiResult.stdout)
+      : [];
+  }
+
   return buildOpenCodeSessionOptions(modelOptions);
+}
+
+export function parseOpenCodeApiModels(stdout: string): ProviderModelOption[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return [];
+  }
+  if (!isRecord(parsed) || !Array.isArray(parsed.data)) {
+    return [];
+  }
+
+  const modelOptions: ProviderModelOption[] = [];
+  for (const rawEntry of parsed.data) {
+    if (!isRecord(rawEntry)) continue;
+    const entry = rawEntry as OpenCodeApiModelEntry;
+    if (entry.enabled === false) continue;
+
+    const providerId = readNonEmptyString(entry.providerID);
+    const modelId = readNonEmptyString(entry.id) ?? readNonEmptyString(entry.modelID);
+    if (!providerId || !modelId) continue;
+
+    const labelName = readNonEmptyString(entry.name) ?? modelId;
+    const reasoningEfforts = buildReasoningEffortOptions(normalizeApiVariants(entry.variants));
+    modelOptions.push({
+      value: `${providerId}/${modelId}`,
+      label: `${providerId}/${labelName}`,
+      isDefault: modelOptions.length === 0,
+      defaultReasoningEffort: reasoningEfforts.length > 0
+        ? OPENCODE_DEFAULT_REASONING_EFFORT
+        : null,
+      supportedReasoningEfforts: reasoningEfforts,
+    });
+  }
+  return modelOptions;
 }
 
 export function buildOpenCodeSessionOptions(
@@ -187,6 +252,27 @@ function buildVariantDescription(variant: string, rawConfig: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, any> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function readNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function normalizeApiVariants(value: unknown): Record<string, unknown> {
+  if (!Array.isArray(value)) return {};
+
+  const variants: Record<string, unknown> = {};
+  for (const rawVariant of value) {
+    if (!isRecord(rawVariant)) continue;
+    const variantId = readNonEmptyString(rawVariant.id);
+    if (!variantId || variantId === OPENCODE_DEFAULT_REASONING_EFFORT || variantId in variants) {
+      continue;
+    }
+    variants[variantId] = isRecord(rawVariant.settings) ? rawVariant.settings : {};
+  }
+  return variants;
 }
 
 function countChar(value: string, char: string): number {
